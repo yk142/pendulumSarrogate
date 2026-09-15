@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from pendulum.evaluate import evaluate_rollout, plot_timeseries_comparison
+from pendulum.evaluate import analyze_error_vs_amplitude, evaluate_rollout, plot_timeseries_comparison
 from pendulum.train import train_nss_model
 
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent.parent / "outputs"
@@ -21,7 +21,7 @@ DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent.parent / "outputs"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", choices=["train", "evaluate", "timeseries", "all"], help="実行するステップ"
+        "command", choices=["train", "evaluate", "timeseries", "diagnose", "all"], help="実行するステップ"
     )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--seed", type=int, default=0)
@@ -71,6 +71,15 @@ def main():
             output_dir=output_dir,
             horizon=args.horizon,
             seed=args.seed + 2000,
+        )
+
+    if args.command == "diagnose":
+        print("=== analyzing error vs amplitude/velocity ===")
+        analyze_error_vs_amplitude(
+            output_dir=output_dir,
+            n_rollouts=max(args.n_rollouts, 100),
+            horizon=args.horizon,
+            seed=args.seed + 1000,
         )
 
 
