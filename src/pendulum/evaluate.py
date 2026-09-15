@@ -172,6 +172,63 @@ def plot_timeseries_comparison(
     return save_path
 
 
+def analyze_error_vs_amplitude(
+    output_dir: Path,
+    n_rollouts: int = 100,
+    horizon: int = 200,
+    seed: int = 1000,
+    u_amplitude: float = 2.0,
+):
+    """軌道の振幅・角速度の大きさと最終ロールアウト誤差の相関を診断する。"""
+    set_seed(seed)
+    output_dir = Path(output_dir)
+    model, normalizer = load_model(output_dir)
+    sim = PendulumSimulator()
+
+    trajectories = generate_rollout_set(sim, n_rollouts, horizon, seed=seed, u_amplitude=u_amplitude)
+
+    max_abs_theta_dot = np.zeros(n_rollouts)
+    max_abs_theta = np.zeros(n_rollouts)
+    final_error = np.zeros(n_rollouts)
+    for i, traj in enumerate(trajectories):
+        states_pred = rollout_model(model, normalizer, traj.x0, traj.u_sequence)
+        errors = rollout_error(traj.states_gt, states_pred)
+        final_error[i] = errors[-1]
+        max_abs_theta_dot[i] = np.abs(traj.states_gt[:, 1]).max()
+        max_abs_theta[i] = np.abs(wrap_angle(traj.states_gt[:, 0])).max()
+
+    corr_theta_dot = float(np.corrcoef(max_abs_theta_dot, final_error)[0, 1])
+    corr_theta = float(np.corrcoef(max_abs_theta, final_error)[0, 1])
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    axes[0].scatter(max_abs_theta_dot, final_error, alpha=0.6)
+    axes[0].set_xlabel("max |theta_dot| over trajectory [rad/s]")
+    axes[0].set_ylabel(f"final rollout error (step {horizon})")
+    axes[0].set_title(f"corr={corr_theta_dot:.3f}")
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].scatter(max_abs_theta, final_error, alpha=0.6, color="C1")
+    axes[1].set_xlabel("max |theta| over trajectory [rad]")
+    axes[1].set_ylabel(f"final rollout error (step {horizon})")
+    axes[1].set_title(f"corr={corr_theta:.3f}")
+    axes[1].grid(True, alpha=0.3)
+
+    fig.suptitle(f"error vs amplitude/velocity (n={n_rollouts})")
+    fig.tight_layout()
+    save_path = output_dir / "error_vs_amplitude.png"
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+
+    result = {"corr_theta_dot": corr_theta_dot, "corr_theta": corr_theta}
+    with open(output_dir / "error_vs_amplitude_summary.json", "w") as f:
+        json.dump(result, f, indent=2)
+
+    print(f"corr(max|theta_dot|, final_error) = {corr_theta_dot:.3f}")
+    print(f"corr(max|theta|, final_error)     = {corr_theta:.3f}")
+    print(f"plot saved to {save_path}")
+    return result
+
+
 def plot_comparison(run_specs, save_path: Path):
     """複数実験(label, output_dir)のロールアウト誤差成長カーブを1枚に重ね書きする。
 

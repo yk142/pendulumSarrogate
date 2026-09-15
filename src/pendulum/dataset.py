@@ -9,9 +9,31 @@ from .simulator import PendulumSimulator
 from .utils import Normalizer, generate_aprbs
 
 
-def sample_initial_state(rng: np.random.Generator) -> np.ndarray:
+def separatrix_speed(sim: PendulumSimulator) -> float:
+    """減衰・トルクなしの場合に振り子が頂点(theta=pi)を超えるために必要な臨界角速度 sqrt(4g/L)。
+
+    診断の結果、このセパラトリクス近傍(振り子が頂点を超えるか反転するかの境界)で
+    ロールアウト誤差が全モデル共通で最大化することが分かったため、学習データ生成時に
+    この付近を重点的にサンプリングするための基準値として使う。
+    """
+    p = sim.params
+    return np.sqrt(4 * p.g / p.L)
+
+
+def sample_initial_state(
+    rng: np.random.Generator,
+    sim: PendulumSimulator = None,
+    oversample_separatrix: bool = False,
+    separatrix_frac: float = 0.3,
+    separatrix_band: float = 1.5,
+) -> np.ndarray:
     theta0 = rng.uniform(-np.pi, np.pi)
-    theta_dot0 = rng.uniform(-8.0, 8.0)
+    if oversample_separatrix and sim is not None and rng.uniform() < separatrix_frac:
+        v_c = separatrix_speed(sim)
+        sign = rng.choice([-1.0, 1.0])
+        theta_dot0 = sign * rng.uniform(v_c - separatrix_band, v_c + separatrix_band)
+    else:
+        theta_dot0 = rng.uniform(-8.0, 8.0)
     return np.array([theta0, theta_dot0])
 
 
@@ -21,12 +43,13 @@ def generate_transitions(
     traj_len: int,
     seed: int,
     u_amplitude: float = 2.0,
+    oversample_separatrix: bool = False,
 ):
     """短い軌道を多数生成し、(x_t, u_t, x_{t+1}) の集合を返す。"""
     rng = np.random.default_rng(seed)
     xs, us, x_nexts = [], [], []
     for _ in range(n_trajectories):
-        x0 = sample_initial_state(rng)
+        x0 = sample_initial_state(rng, sim, oversample_separatrix=oversample_separatrix)
         u_seq = generate_aprbs(traj_len, amplitude=u_amplitude, rng=rng)
         states = sim.rollout(x0, u_seq)
         xs.append(states[:-1])
@@ -83,6 +106,7 @@ def generate_sequences(
     seed: int,
     u_amplitude: float = 2.0,
     stride: int = 1,
+    oversample_separatrix: bool = False,
 ):
     """マルチステップ学習用に、長さ(horizon+1)の状態列と長さhorizonの入力列をスライディングウィンドウで抽出する。
 
@@ -96,7 +120,7 @@ def generate_sequences(
     rng = np.random.default_rng(seed)
     x0s, u_seqs, states_seqs = [], [], []
     for _ in range(n_trajectories):
-        x0 = sample_initial_state(rng)
+        x0 = sample_initial_state(rng, sim, oversample_separatrix=oversample_separatrix)
         u_seq = generate_aprbs(traj_len, amplitude=u_amplitude, rng=rng)
         states = sim.rollout(x0, u_seq)
         for start in range(0, traj_len - horizon + 1, stride):
