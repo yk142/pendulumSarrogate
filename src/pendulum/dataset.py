@@ -75,6 +75,54 @@ class TransitionDataset(Dataset):
         return self.inputs[idx], self.targets[idx]
 
 
+def generate_sequences(
+    sim: PendulumSimulator,
+    n_trajectories: int,
+    traj_len: int,
+    horizon: int,
+    seed: int,
+    u_amplitude: float = 2.0,
+    stride: int = 1,
+):
+    """マルチステップ学習用に、長さ(horizon+1)の状態列と長さhorizonの入力列をスライディングウィンドウで抽出する。
+
+    Returns
+    -------
+    x0s: shape (N, 2) 各シーケンスの初期状態
+    u_seqs: shape (N, horizon)
+    states_seqs: shape (N, horizon+1, 2)
+    """
+    assert traj_len >= horizon, "traj_len must be >= horizon"
+    rng = np.random.default_rng(seed)
+    x0s, u_seqs, states_seqs = [], [], []
+    for _ in range(n_trajectories):
+        x0 = sample_initial_state(rng)
+        u_seq = generate_aprbs(traj_len, amplitude=u_amplitude, rng=rng)
+        states = sim.rollout(x0, u_seq)
+        for start in range(0, traj_len - horizon + 1, stride):
+            x0s.append(states[start])
+            u_seqs.append(u_seq[start : start + horizon])
+            states_seqs.append(states[start : start + horizon + 1])
+    return np.array(x0s), np.array(u_seqs), np.array(states_seqs)
+
+
+class SequenceDataset(Dataset):
+    """マルチステップ学習用データセット。NN入出力表現へのエンコード込み。"""
+
+    def __init__(self, x0s: np.ndarray, u_seqs: np.ndarray, states_seqs: np.ndarray, normalizer: Normalizer):
+        self.normalizer = normalizer
+        self.x0_enc = torch.tensor(encode_state(x0s[:, 0], x0s[:, 1], normalizer), dtype=torch.float32)
+        self.u_norm_seq = torch.tensor(normalizer.normalize_u(u_seqs), dtype=torch.float32)
+        target_enc = encode_state(states_seqs[..., 0], states_seqs[..., 1], normalizer)
+        self.target_enc_seq = torch.tensor(target_enc, dtype=torch.float32)
+
+    def __len__(self):
+        return len(self.x0_enc)
+
+    def __getitem__(self, idx):
+        return self.x0_enc[idx], self.u_norm_seq[idx], self.target_enc_seq[idx]
+
+
 @dataclass
 class RolloutTrajectory:
     x0: np.ndarray

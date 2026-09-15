@@ -28,20 +28,32 @@ def main():
     parser.add_argument("--n-trajectories", type=int, default=200)
     parser.add_argument("--traj-len", type=int, default=100)
     parser.add_argument("--n-epochs", type=int, default=100)
+    parser.add_argument("--epochs-per-stage", type=int, default=40)
     parser.add_argument("--n-rollouts", type=int, default=20)
     parser.add_argument("--horizon", type=int, default=250)
+    parser.add_argument(
+        "--model-type", choices=["residual", "kinematic"], default="residual",
+        help="residual: フェーズ1のベースライン残差モデル / kinematic: 運動学的制約付きモデル",
+    )
+    parser.add_argument(
+        "--training-mode", choices=["onestep", "multistep"], default="onestep",
+        help="onestep: 1-step教師あり学習 / multistep: カリキュラム型ロールアウト損失学習",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
 
     if args.command in ("train", "all"):
-        print("=== training NSS surrogate (1-step) ===")
+        print(f"=== training NSS surrogate (model_type={args.model_type}, training_mode={args.training_mode}) ===")
         train_nss_model(
             output_dir=output_dir,
+            model_type=args.model_type,
+            training_mode=args.training_mode,
             n_trajectories=args.n_trajectories,
             traj_len=args.traj_len,
             seed=args.seed,
             n_epochs=args.n_epochs,
+            epochs_per_stage=args.epochs_per_stage,
         )
 
     if args.command in ("evaluate", "all"):

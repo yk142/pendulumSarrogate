@@ -6,8 +6,8 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-from .dataset import RolloutTrajectory, generate_rollout_set
-from .models import NSSModel
+from .dataset import generate_rollout_set
+from .models import build_model, rollout_encoded
 from .simulator import PendulumSimulator
 from .utils import Normalizer, set_seed, wrap_angle
 
@@ -18,7 +18,13 @@ def load_model(output_dir: Path):
         cfg = json.load(f)
     with open(output_dir / "normalizer.json") as f:
         norm_dict = json.load(f)
-    model = NSSModel(hidden_dim=cfg["hidden_dim"], n_hidden_layers=cfg["n_hidden_layers"])
+    model = build_model(
+        cfg["model_type"],
+        hidden_dim=cfg["hidden_dim"],
+        n_hidden_layers=cfg["n_hidden_layers"],
+        dt=cfg["dt"],
+        theta_dot_std=cfg.get("theta_dot_std", 1.0),
+    )
     model.load_state_dict(torch.load(output_dir / "nss_model.pt"))
     model.eval()
     normalizer = Normalizer.from_dict(norm_dict)
@@ -26,29 +32,29 @@ def load_model(output_dir: Path):
 
 
 @torch.no_grad()
-def rollout_model(model: NSSModel, normalizer: Normalizer, x0: np.ndarray, u_sequence: np.ndarray) -> np.ndarray:
+def rollout_model(model, normalizer: Normalizer, x0: np.ndarray, u_sequence: np.ndarray) -> np.ndarray:
     """学習済みNSSモデルで自己回帰的にロールアウトする。
 
     Returns states array shape (len(u_sequence)+1, 2) = [theta, theta_dot]（thetaは連続量、非ラップ）。
     """
     theta0, theta_dot0 = x0
-    cos_t = torch.tensor(np.cos(theta0), dtype=torch.float32)
-    sin_t = torch.tensor(np.sin(theta0), dtype=torch.float32)
-    theta_dot_n = torch.tensor(normalizer.normalize_theta_dot(theta_dot0), dtype=torch.float32)
+    x_enc0 = torch.tensor(
+        [np.cos(theta0), np.sin(theta0), normalizer.normalize_theta_dot(theta_dot0)], dtype=torch.float32
+    )
+    u_norm_seq = torch.tensor(normalizer.normalize_u(u_sequence), dtype=torch.float32)
 
-    theta_unwrapped = theta0
-    states = [np.array([theta0, theta_dot0])]
-    for u in u_sequence:
-        u_n = torch.tensor(normalizer.normalize_u(u), dtype=torch.float32)
-        theta_next, theta_dot_next, cos_next, sin_next, theta_dot_n_next = model.predict_theta_thetadot(
-            cos_t, sin_t, theta_dot_n, u_n, normalizer
-        )
-        # atan2の主値からthetaの連続量(unwrap)を復元する
-        delta = wrap_angle(theta_next.item() - wrap_angle(np.array(theta_unwrapped)))
-        theta_unwrapped = theta_unwrapped + delta
-        states.append(np.array([theta_unwrapped, theta_dot_next.item()]))
-        cos_t, sin_t, theta_dot_n = cos_next, sin_next, theta_dot_n_next
-    return np.array(states)
+    encoded = rollout_encoded(model, x_enc0, u_norm_seq).numpy()  # (H+1, 3)
+    theta_principal = np.arctan2(encoded[:, 1], encoded[:, 0])
+    theta_dot = normalizer.denormalize_theta_dot(encoded[:, 2])
+
+    # atan2の主値から連続量(unwrap)のthetaを復元する
+    theta_unwrapped = np.zeros_like(theta_principal)
+    theta_unwrapped[0] = theta0
+    for i in range(1, len(theta_principal)):
+        delta = wrap_angle(theta_principal[i] - theta_principal[i - 1])
+        theta_unwrapped[i] = theta_unwrapped[i - 1] + delta
+
+    return np.stack([theta_unwrapped, theta_dot], axis=-1)
 
 
 def rollout_error(states_gt: np.ndarray, states_pred: np.ndarray) -> np.ndarray:
@@ -93,6 +99,14 @@ def evaluate_rollout(
     fig.tight_layout()
     fig.savefig(output_dir / "rollout_error.png", dpi=150)
     plt.close(fig)
+
+    np.savez(
+        output_dir / "rollout_errors.npz",
+        steps=steps,
+        mean_error=mean_error,
+        max_error=max_error,
+        min_error=min_error,
+    )
 
     result = {
         "mean_error_final": float(mean_error[-1]),
@@ -155,4 +169,28 @@ def plot_timeseries_comparison(
     fig.savefig(save_path, dpi=150)
     plt.close(fig)
     print(f"time-series comparison plot saved to {save_path}")
+    return save_path
+
+
+def plot_comparison(run_specs, save_path: Path):
+    """複数実験(label, output_dir)のロールアウト誤差成長カーブを1枚に重ね書きする。
+
+    run_specs: list of (label: str, output_dir: Path)  各output_dirに rollout_errors.npz が必要
+    """
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for label, output_dir in run_specs:
+        data = np.load(Path(output_dir) / "rollout_errors.npz")
+        ax.plot(data["steps"], data["mean_error"], label=label)
+
+    ax.set_xlabel("rollout step")
+    ax.set_ylabel("mean state error norm  sqrt(wrap(dtheta)^2 + dtheta_dot^2)")
+    ax.set_title("Rollout error growth comparison across mitigation strategies")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+    print(f"comparison plot saved to {save_path}")
     return save_path
